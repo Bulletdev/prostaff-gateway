@@ -11,27 +11,32 @@
 .env.development
 .env.staging
 
-# vendor is committed to simplify Docker builds without network
-# vendor/
-
-# Binaries for programs and plugins
+# Compiled binaries
+gateway
+server
+main
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
-# Test binary, built with `go test -c`
+# Test binary
 *.test
 
-# Output of the go coverage tool, specifically when used with LiteIDE
+# Coverage
 *.out
+coverage.html
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
+# Go workspace
 go.work
+go.work.sum
 
-# Swagger codegen output
-/output/.swagger-codegen/
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db

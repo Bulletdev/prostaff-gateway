@@ -1,26 +1,30 @@
-
-name: Go
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
-
   build:
+    name: Build & Test
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5.1.0
-      with:
-        go-version: '1.23'
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
 
-    - name: Build
-      run: go build -mod=readonly -v ./...
+      - name: Vet
+        run: go vet ./...
 
-    - name: Test
-      run: go test -mod=readonly -v ./...
+      - name: Build
+        run: CGO_ENABLED=0 go build -v ./cmd/server/
+
+      - name: Test
+        run: go test -v ./...
