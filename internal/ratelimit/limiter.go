@@ -2,7 +2,6 @@ package ratelimit
 
 import (
 	"context"
-	"sync"
 
 	"golang.org/x/time/rate"
 )
@@ -41,43 +40,32 @@ var ServerToRouting = map[string]string{
 	"oc1":  "sea",
 }
 
-// RegionLimiter holds one token bucket per Riot region.
-type RegionLimiter struct {
-	mu       sync.RWMutex
-	limiters map[string]*rate.Limiter
-	rps      float64
-	burst    int
+// AppLimiter enforces the Riot app-level rate limit globally across all regions.
+// It combines two token buckets to cover both the per-second and per-2-minute windows
+// that Riot enforces on every API key.
+type AppLimiter struct {
+	perSecond *rate.Limiter
+	per2Min   *rate.Limiter
 }
 
-func NewRegionLimiter(rps float64, burst int) *RegionLimiter {
-	return &RegionLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		rps:      rps,
-		burst:    burst,
+// NewAppLimiter creates an AppLimiter with independent per-second and per-2-minute buckets.
+// rps and burst configure the 1-second window; per2Min configures the 2-minute window.
+func NewAppLimiter(rps float64, burst int, per2Min int) *AppLimiter {
+	return &AppLimiter{
+		perSecond: rate.NewLimiter(rate.Limit(rps), burst),
+		// Riot's 2-min limit modelled as a token bucket: refill rate = per2Min/120s, burst = per2Min.
+		// This is a safe approximation: it prevents bursting past the 2-min cap while
+		// allowing the full burst at startup (matching Riot's sliding-window behaviour).
+		per2Min: rate.NewLimiter(rate.Limit(float64(per2Min)/120.0), per2Min),
 	}
 }
 
-// Wait blocks until a token is available for the given region, or ctx is cancelled.
-func (rl *RegionLimiter) Wait(ctx context.Context, region string) error {
-	return rl.get(region).Wait(ctx)
-}
-
-func (rl *RegionLimiter) get(region string) *rate.Limiter {
-	rl.mu.RLock()
-	l, ok := rl.limiters[region]
-	rl.mu.RUnlock()
-	if ok {
-		return l
+// Wait blocks until both rate windows have capacity, or ctx is cancelled.
+func (al *AppLimiter) Wait(ctx context.Context) error {
+	if err := al.perSecond.Wait(ctx); err != nil {
+		return err
 	}
-
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if l, ok = rl.limiters[region]; ok {
-		return l
-	}
-	l = rate.NewLimiter(rate.Limit(rl.rps), rl.burst)
-	rl.limiters[region] = l
-	return l
+	return al.per2Min.Wait(ctx)
 }
 
 // ValidRegion returns true if the region is in the allowed list.

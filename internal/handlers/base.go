@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -49,6 +50,10 @@ func (d *deps) fetch(
 	data, status, err := d.riot.Do(r.Context(), region, riotPath)
 	if err != nil {
 		d.logger.Warn("riot call failed", "region", region, "path", riotPath, "status", status, "error", err)
+		var rlErr *riot.RateLimitError
+		if errors.As(err, &rlErr) && rlErr.RetryAfter != "" {
+			w.Header().Set("Retry-After", rlErr.RetryAfter)
+		}
 		webutils.ErrorJSON(w, err, status)
 		return
 	}

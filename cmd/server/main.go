@@ -28,7 +28,7 @@ func main() {
 	l1 := cache.NewMemory(60 * time.Second)
 	l2 := cache.NewRedis(cfg.RedisURL, cfg.CacheEnabled, logger)
 
-	limiter := ratelimit.NewRegionLimiter(cfg.RiotRateLimitPerSecond, cfg.RiotRateLimitBurst)
+	limiter := ratelimit.NewAppLimiter(cfg.RiotRateLimitPerSecond, cfg.RiotRateLimitBurst, cfg.RiotRateLimitPer2Min)
 	breakers := circuit.NewRegionBreakers(cfg.CBThreshold, cfg.CBTimeout, cfg.CBCooldown)
 
 	riotClient := riot.NewClient(cfg.RiotAPITimeout, cfg.RiotAPIKey, limiter, breakers, logger)

@@ -16,6 +16,7 @@ type Config struct {
 	RiotAPITimeout         time.Duration
 	RiotRateLimitPerSecond float64
 	RiotRateLimitBurst     int
+	RiotRateLimitPer2Min   int
 	RedisURL               string
 	CacheEnabled           bool
 	CBThreshold            int
@@ -46,6 +47,7 @@ func Load() *Config {
 		RiotAPITimeout:         getDuration("RIOT_API_TIMEOUT", 5*time.Second),
 		RiotRateLimitPerSecond: getFloat("RIOT_RATE_LIMIT_PER_SECOND", 20.0),
 		RiotRateLimitBurst:     getInt("RIOT_RATE_LIMIT_BURST", 20),
+		RiotRateLimitPer2Min:   getInt("RIOT_RATE_LIMIT_PER_2MIN", 100),
 		RedisURL:               getEnv("REDIS_URL", "redis://localhost:6379/1"),
 		CacheEnabled:           getBool("CACHE_ENABLED", true),
 		CBThreshold:            getInt("CIRCUIT_BREAKER_THRESHOLD", 5),

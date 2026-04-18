@@ -12,11 +12,21 @@ import (
 	"prostaff-riot-gateway/internal/ratelimit"
 )
 
+// RateLimitError is returned when Riot responds with 429. It carries the Retry-After
+// value from the Riot header so callers can propagate it to their own clients.
+type RateLimitError struct {
+	RetryAfter string
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("riot api rate limited, retry after %s seconds", e.RetryAfter)
+}
+
 // Client calls the Riot Games API with rate limiting and circuit breaking.
 type Client struct {
 	http     *http.Client
 	apiKey   string
-	limiter  *ratelimit.RegionLimiter
+	limiter  *ratelimit.AppLimiter
 	breakers *circuit.RegionBreakers
 	logger   *slog.Logger
 }
@@ -24,7 +34,7 @@ type Client struct {
 func NewClient(
 	timeout time.Duration,
 	apiKey string,
-	limiter *ratelimit.RegionLimiter,
+	limiter *ratelimit.AppLimiter,
 	breakers *circuit.RegionBreakers,
 	logger *slog.Logger,
 ) *Client {
@@ -51,7 +61,7 @@ func (c *Client) Do(ctx context.Context, region, path string) ([]byte, int, erro
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("riot api circuit open for region %s", region)
 	}
 
-	if err := c.limiter.Wait(ctx, region); err != nil {
+	if err := c.limiter.Wait(ctx); err != nil {
 		return nil, http.StatusGatewayTimeout, fmt.Errorf("rate limit wait cancelled: %w", err)
 	}
 
@@ -76,12 +86,17 @@ func (c *Client) Do(ctx context.Context, region, path string) ([]byte, int, erro
 		return nil, http.StatusBadGateway, fmt.Errorf("failed to read riot response: %w", err)
 	}
 
-	status := mapRiotStatus(resp.StatusCode)
+	// 429 is a rate limit signal, not an infrastructure failure — do not trip the circuit breaker.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter := resp.Header.Get("Retry-After")
+		c.logger.Warn("riot api rate limited", "region", region, "retry_after", retryAfter)
+		return nil, http.StatusTooManyRequests, &RateLimitError{RetryAfter: retryAfter}
+	}
 
-	if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+	if resp.StatusCode >= 500 {
 		breaker.RecordFailure()
-		c.logger.Warn("riot api returned error", "region", region, "riot_status", resp.StatusCode)
-		return nil, status, fmt.Errorf("riot api returned %d", resp.StatusCode)
+		c.logger.Warn("riot api server error", "region", region, "riot_status", resp.StatusCode)
+		return nil, http.StatusBadGateway, fmt.Errorf("riot api returned %d", resp.StatusCode)
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
@@ -92,17 +107,3 @@ func (c *Client) Do(ctx context.Context, region, path string) ([]byte, int, erro
 	return body, http.StatusOK, nil
 }
 
-func mapRiotStatus(riotStatus int) int {
-	switch {
-	case riotStatus == http.StatusOK:
-		return http.StatusOK
-	case riotStatus == http.StatusNotFound:
-		return http.StatusNotFound
-	case riotStatus == 429:
-		return 429
-	case riotStatus >= 500:
-		return http.StatusBadGateway
-	default:
-		return riotStatus
-	}
-}
