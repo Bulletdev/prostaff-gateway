@@ -1,0 +1,26 @@
+
+name: Go
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4.2.2
+
+    - name: Set up Go
+      uses: actions/setup-go@v5.1.0
+      with:
+        go-version: '1.23'
+
+    - name: Build
+      run: go build -mod=readonly -v ./...
+
+    - name: Test
+      run: go test -mod=readonly -v ./...
