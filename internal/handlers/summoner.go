@@ -64,3 +64,18 @@ func (h *SummonerHandler) AccountByRiotID(w http.ResponseWriter, r *http.Request
 		fmt.Sprintf("/riot/account/v1/accounts/by-riot-id/%s/%s", riotID, tagline),
 	)
 }
+
+// AccountByPUUID handles GET /riot/account/{region}/by-puuid/{puuid}
+func (h *SummonerHandler) AccountByPUUID(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	region, puuid := vars["region"], vars["puuid"]
+	if !validateRegion(region, w) {
+		return
+	}
+	h.fetch(w, r,
+		buildKey("account", "by-puuid", region, puuid),
+		"account",
+		region,
+		fmt.Sprintf("/riot/account/v1/accounts/by-puuid/%s", puuid),
+	)
+}
