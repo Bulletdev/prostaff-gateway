@@ -1,0 +1,23 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: dockerfile
+    expose:
+      - "4444"
+    restart: unless-stopped
+    networks:
+      coolify:
+        aliases:
+          - riot-gateway
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:4444/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      - coolify.managed=true
+
+networks:
+  coolify:
+    external: true
