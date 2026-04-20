@@ -18,10 +18,23 @@ type pinger interface {
 type HealthHandler struct {
 	breakers *circuit.RegionBreakers
 	redis    pinger
+	version  string
+	commit   string
+	builtAt  string
 }
 
-func NewHealthHandler(breakers *circuit.RegionBreakers, redis pinger) *HealthHandler {
-	return &HealthHandler{breakers: breakers, redis: redis}
+func NewHealthHandler(
+	breakers *circuit.RegionBreakers,
+	redis pinger,
+	version, commit, builtAt string,
+) *HealthHandler {
+	return &HealthHandler{
+		breakers: breakers,
+		redis:    redis,
+		version:  version,
+		commit:   commit,
+		builtAt:  builtAt,
+	}
 }
 
 func (h *HealthHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +51,9 @@ func (h *HealthHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	webutils.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"status":           "ok",
+		"version":          h.version,
+		"commit":           h.commit,
+		"built_at":         h.builtAt,
 		"redis":            redisStatus,
 		"circuit_breakers": h.breakers.States(),
 	})

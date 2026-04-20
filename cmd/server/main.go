@@ -16,8 +16,20 @@ import (
 	"prostaff-riot-gateway/internal/circuit"
 	"prostaff-riot-gateway/internal/config"
 	"prostaff-riot-gateway/internal/handlers"
+	"prostaff-riot-gateway/internal/middleware"
 	"prostaff-riot-gateway/internal/ratelimit"
 	"prostaff-riot-gateway/internal/riot"
+)
+
+// Injected at build time via ldflags:
+//
+//	-ldflags "-X main.version=$(git describe --tags --always) \
+//	          -X main.commit=$(git rev-parse --short HEAD) \
+//	          -X main.builtAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+var (
+	version = "dev"
+	commit  = "none"
+	builtAt = "unknown"
 )
 
 func main() {
@@ -25,7 +37,7 @@ func main() {
 
 	logger := buildLogger(cfg.LogLevel)
 
-	l1 := cache.NewMemory(60 * time.Second)
+	l1 := cache.NewMemory(60*time.Second, cfg.CacheL1MaxSize)
 	l2 := cache.NewRedis(cfg.RedisURL, cfg.CacheEnabled, logger)
 
 	limiter := ratelimit.NewAppLimiter(cfg.RiotRateLimitPerSecond, cfg.RiotRateLimitBurst, cfg.RiotRateLimitPer2Min)
@@ -37,7 +49,7 @@ func main() {
 	leagueH := handlers.NewLeagueHandler(riotClient, l1, l2, logger)
 	matchesH := handlers.NewMatchesHandler(riotClient, l1, l2, logger)
 	masteryH := handlers.NewMasteryHandler(riotClient, l1, l2, logger)
-	healthH := handlers.NewHealthHandler(breakers, l2)
+	healthH := handlers.NewHealthHandler(breakers, l2, version, commit, builtAt)
 
 	r := buildRouter(summonerH, leagueH, matchesH, masteryH, healthH, cfg.InternalJWTSecret)
 
@@ -53,7 +65,7 @@ func main() {
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		logger.Info("prostaff-riot-gateway started", "port", cfg.Port)
+		logger.Info("prostaff-riot-gateway started", "port", cfg.Port, "version", version, "commit", commit)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
 			os.Exit(1)
@@ -82,6 +94,7 @@ func buildRouter(
 	jwtSecret string,
 ) *mux.Router {
 	r := mux.NewRouter()
+	r.Use(middleware.RequestID)
 
 	r.HandleFunc("/health", healthH.Handle).Methods(http.MethodGet)
 
@@ -89,6 +102,8 @@ func buildRouter(
 	riot.Use(auth.InternalAuth(jwtSecret))
 
 	riot.HandleFunc("/summoner/{region}/by-puuid/{puuid}", summonerH.ByPUUID).Methods(http.MethodGet)
+	riot.HandleFunc("/summoner/{region}/by-riot-id/{gameName}/{tagLine}", summonerH.ByRiotID).Methods(http.MethodGet)
+	// by-name was removed — Riot deprecated summoner-v4/by-name in 2024.
 	riot.HandleFunc("/summoner/{region}/by-name/{name}", summonerH.ByName).Methods(http.MethodGet)
 	riot.HandleFunc("/account/{region}/{riotId}/{tagline}", summonerH.AccountByRiotID).Methods(http.MethodGet)
 	riot.HandleFunc("/account/{region}/by-puuid/{puuid}", summonerH.AccountByPUUID).Methods(http.MethodGet)

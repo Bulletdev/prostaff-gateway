@@ -19,6 +19,7 @@ type Config struct {
 	RiotRateLimitPer2Min   int
 	RedisURL               string
 	CacheEnabled           bool
+	CacheL1MaxSize         int
 	CBThreshold            int
 	CBTimeout              time.Duration
 	CBCooldown             time.Duration
@@ -50,6 +51,7 @@ func Load() *Config {
 		RiotRateLimitPer2Min:   getInt("RIOT_RATE_LIMIT_PER_2MIN", 100),
 		RedisURL:               getEnv("REDIS_URL", "redis://localhost:6379/1"),
 		CacheEnabled:           getBool("CACHE_ENABLED", true),
+		CacheL1MaxSize:         getInt("CACHE_L1_MAX_SIZE", 10000),
 		CBThreshold:            getInt("CIRCUIT_BREAKER_THRESHOLD", 5),
 		CBTimeout:              getDuration("CIRCUIT_BREAKER_TIMEOUT", 60*time.Second),
 		CBCooldown:             getDuration("CIRCUIT_BREAKER_COOLDOWN", 30*time.Second),

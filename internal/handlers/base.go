@@ -13,7 +13,6 @@ import (
 	"prostaff-riot-gateway/internal/webutils"
 )
 
-// deps bundles shared dependencies for all handlers.
 type deps struct {
 	riot   *riot.Client
 	l1     *cache.Memory
@@ -21,7 +20,6 @@ type deps struct {
 	logger *slog.Logger
 }
 
-// fetch executes the full cache-lookup → riot-call → cache-set pipeline.
 func (d *deps) fetch(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -30,14 +28,18 @@ func (d *deps) fetch(
 	region string,
 	riotPath string,
 ) {
-	// L1 hit
+	if d.l1.IsNegative(cacheKey) {
+		d.logger.Debug("cache L1 negative hit", "key", cacheKey)
+		webutils.ErrorJSON(w, fmt.Errorf("not found"), http.StatusNotFound)
+		return
+	}
+
 	if data, ok := d.l1.Get(cacheKey); ok {
 		d.logger.Debug("cache L1 hit", "key", cacheKey)
 		webutils.RawJSON(w, http.StatusOK, data)
 		return
 	}
 
-	// L2 hit
 	if data, err := d.l2.Get(r.Context(), cacheKey); err == nil {
 		ttl := cache.TTLs[ttlKey]
 		d.l1.Set(cacheKey, data, ttl.L1)
@@ -46,14 +48,22 @@ func (d *deps) fetch(
 		return
 	}
 
-	// Riot API call
 	data, status, err := d.riot.Do(r.Context(), region, riotPath)
 	if err != nil {
 		d.logger.Warn("riot call failed", "region", region, "path", riotPath, "status", status, "error", err)
+
 		var rlErr *riot.RateLimitError
 		if errors.As(err, &rlErr) && rlErr.RetryAfter != "" {
 			w.Header().Set("Retry-After", rlErr.RetryAfter)
 		}
+
+		if riot.IsNotFound(err) {
+			if ttl, ok := cache.NegativeTTLs[ttlKey]; ok {
+				d.l1.SetNegative(cacheKey, ttl)
+				d.logger.Debug("cached 404 negative", "key", cacheKey, "ttl", ttl)
+			}
+		}
+
 		webutils.ErrorJSON(w, err, status)
 		return
 	}

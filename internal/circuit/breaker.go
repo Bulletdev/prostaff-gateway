@@ -27,14 +27,14 @@ func (s State) String() string {
 }
 
 type Breaker struct {
-	mu         sync.Mutex
-	threshold  int
-	cbTimeout  time.Duration
-	cooldown   time.Duration
-	failures   int
+	mu          sync.Mutex
+	threshold   int
+	cbTimeout   time.Duration
+	cooldown    time.Duration
+	failures    int
 	windowStart time.Time
-	openedAt   time.Time
-	state      State
+	openedAt    time.Time
+	state       State
 }
 
 func New(threshold int, cbTimeout, cooldown time.Duration) *Breaker {
@@ -46,7 +46,6 @@ func New(threshold int, cbTimeout, cooldown time.Duration) *Breaker {
 	}
 }
 
-// Allow returns false when the circuit is open and the cooldown has not elapsed.
 func (b *Breaker) Allow() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -66,7 +65,6 @@ func (b *Breaker) Allow() bool {
 	return false
 }
 
-// RecordSuccess resets the breaker on a successful call.
 func (b *Breaker) RecordSuccess() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -74,7 +72,6 @@ func (b *Breaker) RecordSuccess() {
 	b.state = StateClosed
 }
 
-// RecordFailure increments the failure count and opens the circuit if threshold reached.
 func (b *Breaker) RecordFailure() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -92,17 +89,18 @@ func (b *Breaker) RecordFailure() {
 	}
 }
 
-// State returns the current circuit state (safe for external reads).
 func (b *Breaker) State() State {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.state
 }
 
-// RegionBreakers manages one Breaker per Riot region.
+// RegionBreakers manages one Breaker per (region, endpoint) composite key.
+// This prevents a failure in one endpoint group from tripping the circuit for
+// healthy endpoints in the same region.
 type RegionBreakers struct {
-	mu       sync.RWMutex
-	breakers map[string]*Breaker
+	mu        sync.RWMutex
+	breakers  map[string]*Breaker
 	threshold int
 	cbTimeout time.Duration
 	cooldown  time.Duration
@@ -117,9 +115,11 @@ func NewRegionBreakers(threshold int, cbTimeout, cooldown time.Duration) *Region
 	}
 }
 
-func (rb *RegionBreakers) Get(region string) *Breaker {
+// Get returns the breaker for (region, endpoint). Key: "region:endpoint" e.g. "br1:summoner".
+func (rb *RegionBreakers) Get(region, endpoint string) *Breaker {
+	key := region + ":" + endpoint
 	rb.mu.RLock()
-	b, ok := rb.breakers[region]
+	b, ok := rb.breakers[key]
 	rb.mu.RUnlock()
 	if ok {
 		return b
@@ -127,21 +127,20 @@ func (rb *RegionBreakers) Get(region string) *Breaker {
 
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	if b, ok = rb.breakers[region]; ok {
+	if b, ok = rb.breakers[key]; ok {
 		return b
 	}
 	b = New(rb.threshold, rb.cbTimeout, rb.cooldown)
-	rb.breakers[region] = b
+	rb.breakers[key] = b
 	return b
 }
 
-// States returns a snapshot of every known region's state (for /health).
 func (rb *RegionBreakers) States() map[string]string {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
 	out := make(map[string]string, len(rb.breakers))
-	for region, b := range rb.breakers {
-		out[region] = b.State().String()
+	for key, b := range rb.breakers {
+		out[key] = b.State().String()
 	}
 	return out
 }

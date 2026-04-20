@@ -1,8 +1,9 @@
 package cache
 
 import (
-	"sync"
 	"time"
+
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 type entry struct {
@@ -10,35 +11,53 @@ type entry struct {
 	expiresAt time.Time
 }
 
-// Memory is a thread-safe in-process cache with TTL (L1).
 type Memory struct {
-	store sync.Map
+	cache *lru.Cache[string, entry]
 }
 
-func NewMemory(gcInterval time.Duration) *Memory {
-	m := &Memory{}
+func NewMemory(gcInterval time.Duration, maxSize int) *Memory {
+	c, _ := lru.New[string, entry](maxSize)
+	m := &Memory{cache: c}
 	go m.gc(gcInterval)
 	return m
 }
 
 func (m *Memory) Get(key string) ([]byte, bool) {
-	v, ok := m.store.Load(key)
+	v, ok := m.cache.Get(key)
 	if !ok {
 		return nil, false
 	}
-	e := v.(entry)
-	if time.Now().After(e.expiresAt) {
-		m.store.Delete(key)
+	if time.Now().After(v.expiresAt) {
+		m.cache.Remove(key)
 		return nil, false
 	}
-	return e.data, true
+	return v.data, true
 }
 
 func (m *Memory) Set(key string, data []byte, ttl time.Duration) {
-	m.store.Store(key, entry{
+	m.cache.Add(key, entry{
 		data:      data,
 		expiresAt: time.Now().Add(ttl),
 	})
+}
+
+func (m *Memory) SetNegative(key string, ttl time.Duration) {
+	m.cache.Add("404:"+key, entry{
+		data:      nil,
+		expiresAt: time.Now().Add(ttl),
+	})
+}
+
+func (m *Memory) IsNegative(key string) bool {
+	v, ok := m.cache.Get("404:" + key)
+	if !ok {
+		return false
+	}
+	if time.Now().After(v.expiresAt) {
+		m.cache.Remove("404:" + key)
+		return false
+	}
+	return true
 }
 
 func (m *Memory) gc(interval time.Duration) {
@@ -46,11 +65,10 @@ func (m *Memory) gc(interval time.Duration) {
 	defer ticker.Stop()
 	for range ticker.C {
 		now := time.Now()
-		m.store.Range(func(k, v interface{}) bool {
-			if now.After(v.(entry).expiresAt) {
-				m.store.Delete(k)
+		for _, key := range m.cache.Keys() {
+			if v, ok := m.cache.Peek(key); ok && now.After(v.expiresAt) {
+				m.cache.Remove(key)
 			}
-			return true
-		})
+		}
 	}
 }
