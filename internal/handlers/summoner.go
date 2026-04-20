@@ -162,7 +162,7 @@ func (h *SummonerHandler) ByRiotID(w http.ResponseWriter, r *http.Request) {
 	webutils.RawJSON(w, http.StatusOK, merged)
 }
 
-// AccountByRiotID handles GET /riot/account/{region}/{riotId}/{tagline}
+// AccountByRiotID handles GET /riot/account/{region}/by-riot-id/{riotId}/{tagline}
 func (h *SummonerHandler) AccountByRiotID(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	region, riotID, tagline := vars["region"], vars["riotId"], vars["tagline"]

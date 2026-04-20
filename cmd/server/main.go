@@ -105,8 +105,8 @@ func buildRouter(
 	riot.HandleFunc("/summoner/{region}/by-riot-id/{gameName}/{tagLine}", summonerH.ByRiotID).Methods(http.MethodGet)
 	// by-name was removed — Riot deprecated summoner-v4/by-name in 2024.
 	riot.HandleFunc("/summoner/{region}/by-name/{name}", summonerH.ByName).Methods(http.MethodGet)
-	riot.HandleFunc("/account/{region}/{riotId}/{tagline}", summonerH.AccountByRiotID).Methods(http.MethodGet)
 	riot.HandleFunc("/account/{region}/by-puuid/{puuid}", summonerH.AccountByPUUID).Methods(http.MethodGet)
+	riot.HandleFunc("/account/{region}/by-riot-id/{riotId}/{tagline}", summonerH.AccountByRiotID).Methods(http.MethodGet)
 
 	riot.HandleFunc("/league/{region}/by-summoner/{summonerId}", leagueH.BySummoner).Methods(http.MethodGet)
 	riot.HandleFunc("/league/{region}/by-puuid/{puuid}", leagueH.ByPUUID).Methods(http.MethodGet)
