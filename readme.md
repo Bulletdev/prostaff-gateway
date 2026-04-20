@@ -13,7 +13,7 @@
 [![Go Version](https://img.shields.io/badge/go-1.23-00ADD8?logo=go)](https://golang.org/)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker)](https://www.docker.com/)
-[![License](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](http://creativecommons.org/licenses/by-nc-sa/4.0/)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 </div>
 
@@ -35,14 +35,17 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  [■] Global Rate Limiting     — Token bucket per region (x/time/rate)       │
-│  [■] Two-tier Cache           — L1 in-process (sync.Map) + L2 Redis         │
-│  [■] Circuit Breaker          — 3-state per region: closed/open/half-open   │
-│  [■] Internal JWT Auth        — Only ProStaff services can call the gateway │
+│  [■] Global App Rate Limiting — Single token bucket for the API key         │
+│  [■] Two-tier Cache           — L1 LRU in-process + L2 Redis                │
+│  [■] Negative Cache           — 404s cached in L1 (short TTL per resource)  │
+│  [■] Circuit Breaker          — Per (region, endpoint): match ≠ summoner    │
+│  [■] Retry with Backoff       — 5xx retried 3× (0/100ms/500ms) before open  │ 
+│  [■] Internal JWT Auth        — aud-validated; user tokens rejected         │
 │  [■] Regional Routing         — Auto-resolves Match-V5 routing region       │
 │  [■] Graceful Degradation     — Redis down? L1 cache keeps serving          │
+│  [■] Request ID Propagation   — X-Request-ID for cross-service log correl.  │
+│  [■] Build Info in /health    — version, commit, built_at via ldflags       │
 │  [■] Structured JSON Logging  — slog JSON, compatible with log aggregators  │
-│  [■] Health Endpoint          — Circuit breaker states + Redis connectivity │
 │  [■] Graceful Shutdown        — 5s drain on SIGTERM                         │
 │  [■] Docker Ready             — Multi-stage build, image < 20MB             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -103,7 +106,7 @@ curl http://localhost:4444/health
 ║  HTTP Router         ║  Gorilla Mux v1.8                                  ║
 ║  Authentication      ║  JWT HS256 (golang-jwt/jwt v5)                     ║
 ║  Rate Limiting       ║  golang.org/x/time/rate (token bucket)             ║
-║  Cache L1            ║  sync.Map in-process (TTL + GC goroutine)          ║
+║  Cache L1            ║  hashicorp/golang-lru v2 (LRU + TTL + GC)          ║
 ║  Cache L2            ║  Redis 7 (go-redis/v9)                             ║
 ║  Circuit Breaker     ║  Custom 3-state state machine                      ║
 ║  Config              ║  godotenv + os.Getenv                              ║
@@ -117,35 +120,44 @@ curl http://localhost:4444/health
 ## 03 · Architecture
 
 ```
-prostaff-api (Rails) ──────────┐
-ProStaff-Scraper (Python) ─────┤
-                               ▼
-              [prostaff-riot-gateway :4444]
-                   ┌──────────────────────┐
-                   │  JWT InternalAuth    │  validates service identity
-                   │  RegionLimiter       │  token bucket per region
-                   │  RegionBreakers      │  circuit breaker per region
-                   │  MemoryCache (L1)    │  ~0ms hits, GC every 60s
-                   │  RedisCache  (L2)    │  shared across instances
-                   └──────────────────────┘
-                               │
-                               ▼
-                        Riot Games API
-                   (br1, na1, euw1, kr, ...)
+prostaff-front (vinext) ───────────────────────────┐
+prostaff-mobile(vue.js\quasar+capacitor) ──────────┤
+ArenaBR (NextJS)  ─────────────────────────────────┤
+Scrims  (NextJS)  ─────────────────────────────────┤
+                                  ┌────────────────┘  
+                                  ▼
+prostaff-api (Rails) ──────────────────────────────┐
+ProStaff-Scraper (Python) ─────────────────────────┤
+                                        ┌──────────┘
+                                        ▼
+                          [prostaff-riot-gateway :4444]
+                         ┌──────────────────────┐
+                         │  JWT InternalAuth    │  aud-validated service identity
+                         │  AppLimiter (global) │  single token bucket per API key
+                         │  RegionBreakers      │  circuit breaker per (region,endpoint)
+                         │  MemoryCache (L1)    │  LRU, max 10k entries, negative cache
+                         │  RedisCache  (L2)    │  shared across instances
+                         └──────────────────────┘
+                                     │
+                                     ▼
+                                Riot Games API
+                           (br1, na1, euw1, kr, ...)
 ```
 
 ### Request Pipeline
 
 ```
-1. Validate JWT          → 401 if missing or invalid
-2. Validate region       → 400 if not in allowed list
-3. Check L1 cache        → return in < 2ms if hit
-4. Check L2 Redis        → populate L1, return if hit
-5. Check circuit breaker → 503 if region circuit open
-6. Acquire rate limiter  → blocks until token available
-7. Call Riot API         → 5s timeout
-8. On success            → populate L1 + L2, return 200
-9. On failure            → increment breaker, return mapped error
+1. Validate JWT              → 401 if missing, invalid, or wrong aud
+2. Validate region           → 400 if not in allowed list
+3. Check L1 negative cache   → 404 if resource was confirmed absent recently
+4. Check L1 cache            → return in < 2ms if hit
+5. Check L2 Redis            → populate L1, return if hit
+6. Check circuit breaker     → 503 if (region, endpoint) circuit open
+7. Acquire rate limiter      → blocks until token available (global)
+8. Call Riot API             → 5s timeout, retry 5xx up to 3× with backoff
+9. On success                → populate L1 + L2, return 200
+10. On 404                   → cache negative in L1, return 404
+11. On persistent failure    → trip circuit breaker, return 502
 ```
 
 ### Regional Routing (Match-V5)
@@ -173,8 +185,10 @@ GET  /health
 
 # Summoner / Account
 GET  /riot/summoner/{region}/by-puuid/{puuid}
-GET  /riot/summoner/{region}/by-name/{name}
+GET  /riot/summoner/{region}/by-riot-id/{gameName}/{tagLine}  ← preferred
+GET  /riot/summoner/{region}/by-name/{name}                   ← 410 Gone (Riot deprecated 2024)
 GET  /riot/account/{region}/{riotId}/{tagline}
+GET  /riot/account/{region}/by-puuid/{puuid}
 
 # Ranked
 GET  /riot/league/{region}/by-summoner/{summonerId}
@@ -193,10 +207,13 @@ GET  /riot/mastery/{region}/{puuid}/top?count=10
 ```json
 {
   "status": "ok",
+  "version": "v1.0.0",
+  "commit": "abc1234",
+  "built_at": "2026-04-20T01:00:00Z",
   "redis": "ok",
   "circuit_breakers": {
-    "br1": "closed",
-    "euw1": "open"
+    "br1:summoner": "closed",
+    "americas:match": "open"
   }
 }
 ```
@@ -210,22 +227,28 @@ All configuration via environment variables (`.env`):
 ```bash
 # Gateway
 PORT=4444
-INTERNAL_JWT_SECRET=<same as prostaff-api JWT_SECRET_KEY>
+# Must be different from prostaff-api user JWT secret — generate with: openssl rand -hex 32
+# Tokens must include aud: "prostaff-riot-gateway"
+INTERNAL_JWT_SECRET=<dedicated-gateway-secret>
 
 # Riot API
 RIOT_API_KEY=RGAPI-...
 RIOT_API_TIMEOUT=5s
 
-# Rate Limiting (Riot dev key: 20/s, 100/2min)
+# Rate Limiting (Riot dev key: 20/s, 100/2min — single global bucket)
 RIOT_RATE_LIMIT_PER_SECOND=20
 RIOT_RATE_LIMIT_BURST=20
+RIOT_RATE_LIMIT_PER_2MIN=100
 
-# Cache L2
+# Cache L1 (in-process LRU)
+CACHE_L1_MAX_SIZE=10000          # max entries before LRU eviction
+
+# Cache L2 (Redis)
 REDIS_URL=redis://redis:6379/1   # db 1, separate from prostaff-api db 0
 CACHE_ENABLED=true
 
 # Circuit Breaker
-CIRCUIT_BREAKER_THRESHOLD=5      # failures to open circuit
+CIRCUIT_BREAKER_THRESHOLD=5      # consecutive failures to open circuit
 CIRCUIT_BREAKER_TIMEOUT=60       # failure counting window (seconds)
 CIRCUIT_BREAKER_COOLDOWN=30      # seconds before half-open probe
 
@@ -238,20 +261,21 @@ LOG_LEVEL=info                   # debug | info | warn | error
 ## 06 · Cache TTLs
 
 ```
-╔═══════════════════════╦══════════╦══════════╗
-║  Resource             ║  L1 TTL  ║  L2 TTL  ║
-╠═══════════════════════╬══════════╬══════════╣
-║  summoner by PUUID    ║  10 min  ║  10 min  ║
-║  summoner by name     ║   5 min  ║   5 min  ║
-║  account (riot ID)    ║   1 h    ║   1 h    ║
-║  league entries       ║   5 min  ║   5 min  ║
-║  match IDs list       ║   5 min  ║   5 min  ║
-║  match detail         ║   1 h    ║  24 h    ║
-║  champion mastery     ║  30 min  ║   1 h    ║
-╚═══════════════════════╩══════════╩══════════╝
+╔═══════════════════════╦══════════╦══════════╦══════════════╗
+║  Resource             ║  L1 TTL  ║  L2 TTL  ║  404 (L1)    ║
+╠═══════════════════════╬══════════╬══════════╬══════════════╣
+║  summoner by riot-id  ║  10 min  ║  10 min  ║  30s         ║
+║  summoner by PUUID    ║  10 min  ║  10 min  ║  2 min       ║
+║  account (riot ID)    ║   1 h    ║   1 h    ║  2 min       ║
+║  league entries       ║   5 min  ║   5 min  ║  30s         ║
+║  match IDs list       ║   5 min  ║   5 min  ║  30s         ║
+║  match detail         ║   1 h    ║   24 h   ║  5 min       ║
+║  champion mastery     ║  30 min  ║   1 h    ║  30s         ║
+╚═══════════════════════╩══════════╩══════════╩══════════════╝
 ```
 
 Match detail has a 24h L2 TTL because match data is immutable once the game ends.
+404s are cached only in L1 — they're short-lived and should not persist across instances.
 
 ---
 
@@ -291,27 +315,29 @@ prostaff-riot-gateway/
 │   │   ├── jwt.go              — ServiceClaims, ValidateServiceToken
 │   │   └── middleware.go       — InternalAuth JWT middleware
 │   ├── cache/
-│   │   ├── memory.go           — L1: sync.Map + TTL + GC goroutine
+│   │   ├── memory.go           — L1: hashicorp/golang-lru + TTL + negative cache
 │   │   ├── redis.go            — L2: go-redis/v9, graceful fallback
-│   │   └── ttl.go              — TTL constants per resource type
+│   │   └── ttl.go              — TTL + negative TTL constants per resource type
 │   ├── circuit/
-│   │   └── breaker.go          — 3-state machine, RegionBreakers
+│   │   └── breaker.go          — 3-state machine, RegionBreakers per (region,endpoint)
 │   ├── config/
 │   │   └── config.go           — typed config, godotenv + os.Getenv
 │   ├── handlers/
-│   │   ├── base.go             — shared fetch pipeline (cache→riot→cache)
-│   │   ├── health.go           — GET /health
-│   │   ├── summoner.go         — summoner + account endpoints
+│   │   ├── base.go             — shared fetch pipeline (neg cache→L1→L2→riot)
+│   │   ├── health.go           — GET /health with version + circuit breaker states
+│   │   ├── summoner.go         — summoner (by-riot-id, by-puuid) + account endpoints
 │   │   ├── league.go           — ranked/league endpoints
 │   │   ├── matches.go          — Match-V5 IDs + detail
 │   │   └── mastery.go          — champion mastery
+│   ├── middleware/
+│   │   └── requestid.go        — X-Request-ID propagation (UUID v4 fallback)
 │   ├── ratelimit/
-│   │   └── limiter.go          — token bucket per region, region validation
+│   │   └── limiter.go          — global AppLimiter (1s + 2min), region validation
 │   ├── riot/
-│   │   └── client.go           — HTTP client, rate limit + circuit integration
+│   │   └── client.go           — HTTP client, retry backoff, circuit integration
 │   └── webutils/
 │       └── json_helpers.go     — WriteJSON, RawJSON, ErrorJSON
-├── dockerfile                  — multi-stage, Alpine final image
+├── Dockerfile                  — multi-stage, Alpine final image
 ├── docker-compose.yml          — gateway + Redis
 ├── .env.example
 └── go.mod
@@ -329,11 +355,11 @@ riot-gateway:
   image: prostaff-riot-gateway:latest
   build:
     context: ../prostaff-riot-gateway
-    dockerfile: dockerfile
+    dockerfile: Dockerfile
   ports:
     - "4444:4444"
   environment:
-    - INTERNAL_JWT_SECRET=${JWT_SECRET_KEY}
+    - INTERNAL_JWT_SECRET=${RIOT_GATEWAY_JWT_SECRET}   # dedicated secret, not the user JWT
     - RIOT_API_KEY=${RIOT_API_KEY}
     - REDIS_URL=redis://redis:6379/1
     - PORT=4444
@@ -357,8 +383,14 @@ GATEWAY_URL = ENV.fetch("RIOT_GATEWAY_URL", "http://riot-gateway:4444")
 headers = { "Authorization" => "Bearer #{internal_jwt}" }
 
 def internal_jwt
-  payload = { service: "prostaff-api", exp: 1.hour.from_now.to_i }
-  JWT.encode(payload, ENV.fetch("JWT_SECRET_KEY"), "HS256")
+  payload = {
+    iss: "prostaff-api",
+    aud: "prostaff-riot-gateway",
+    sub: "service-account",
+    service: "prostaff-api",
+    exp: 1.hour.from_now.to_i
+  }
+  JWT.encode(payload, ENV.fetch("RIOT_GATEWAY_JWT_SECRET"), "HS256")
 end
 ```
 
@@ -373,11 +405,13 @@ response = requests.get(
     headers=headers,
     timeout=10
 )
+
+# generate_internal_jwt must include aud: "prostaff-riot-gateway"
 ```
 
 ---
 
-**Last Updated**: 2026-04-17
+**Last Updated**: 2026-04-20
 **Go Version**: 1.23
-**Cache Strategy**: L1 in-process + L2 Redis
-**Rate Limit**: 20 req/s per region (configurable)
+**Cache Strategy**: L1 LRU (hashicorp/golang-lru) + L2 Redis + negative cache
+**Rate Limit**: Global token bucket per API key (20 req/s / 100 req/2min, configurable)
